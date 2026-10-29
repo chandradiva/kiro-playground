@@ -175,7 +175,7 @@ function convertMeditechA08ToCharm(ctx, meta) {
 }
 
 /* ===================== Run (A08 only) ===================== */
-if (charmMeta.sourceEvent === 'A08') {
+if (charmMeta !== null && charmMeta.sourceEvent === 'A08') {
     charmResult = convertMeditechA08ToCharm(charmCtx, charmMeta);
     tmp = charmOutput(charmResult);
 }
