@@ -19,13 +19,11 @@ var charmOptions = {
 // true  = source Outbound data type is HL7 v2.x
 var CHARM_OUTBOUND_HL7V2 = false;
 
-// What to do with messages the old source filter would have rejected
-// (not ADT A08/A31, site not allowed, or no MR identifier):
+// What to do with messages that fail the checks
+// (not ADT A08/A31, no site, or no MR identifier):
 // false = log it and send it to no destination (closest to the old filter)
 // true  = throw an error, so the message shows as ERROR in the dashboard
 var CHARM_REJECT_AS_ERROR = false;
-
-var CHARM_VALID_SITES = 'HPH SGP SCU WRP PPH PGC WGP JFP JHC BEL LMP NOH NWB CPH CBP STA NPH WVP SPP PHC BAR NWP GPH NPE GLE WPH'.split(' ');
 
 /* ===================== HL7 parsing helpers ===================== */
 function HL7_normalize(raw) {
@@ -184,8 +182,6 @@ function mtcInit(raw, options, processingTimestamp) {
 
 function mtcValidateAndExtract(ctx) {
     var f = ctx.f, c = ctx.c, v = ctx.v, sub = ctx.sub, repeat = ctx.repeat, segments = ctx.segments;
-    var sites = 'HPH SGP SCU WRP PPH PGC WGP JFP JHC BEL LMP NOH NWB CPH CBP STA NPH WVP SPP PHC BAR NWP GPH NPE GLE WPH'.split(' ');
-
     if (!segments.MSH || segments.MSH.length !== 1 || !segments.PID || segments.PID.length !== 1) {
         throw new Error('Exactly one MSH and one PID segment are required.');
     }
@@ -198,7 +194,9 @@ function mtcValidateAndExtract(ctx) {
     if (c(f('MSH', 9), 1) !== 'ADT' || (sourceEvent !== 'A08' && sourceEvent !== 'A31')) {
         throw new Error('Only ADT A08 and ADT A31 messages are supported.');
     }
-    if (sites.indexOf(site) < 0) { throw new Error('The input site is not allowed.'); }
+    // Any site is allowed, but one must be present (MSH-4.1 or PID-3.6):
+    // it is written to MSH-4, the PID-3 facility and PV1-39.
+    if (site === '') { throw new Error('No site found in MSH-4 or PID-3.6.'); }
 
     var ids = {}, identifierRows = f('PID', 3).split('~');
     for (var i = 0; i < identifierRows.length; i++) {
@@ -246,7 +244,7 @@ function charmFilterCheck(raw) {
 
     var accepted = messageCode === 'ADT' &&
         (event === 'A08' || event === 'A31') &&
-        CHARM_VALID_SITES.indexOf(site) >= 0 &&
+        site !== '' &&
         hasMR;
 
     return { accepted: accepted, site: site, event: event, hasMR: hasMR };
