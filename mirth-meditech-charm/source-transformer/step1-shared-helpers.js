@@ -19,6 +19,12 @@ var charmOptions = {
 // true  = source Outbound data type is HL7 v2.x
 var CHARM_OUTBOUND_HL7V2 = false;
 
+// What to do with messages that fail the checks
+// (not ADT A08/A31, no site, or no MR identifier):
+// false = log it and send it to no destination (closest to the old filter)
+// true  = throw an error, so the message shows as ERROR in the dashboard
+var CHARM_REJECT_AS_ERROR = false;
+
 /* ===================== HL7 parsing helpers ===================== */
 function HL7_normalize(raw) {
     raw = String(raw).replace(/^\uFEFF/, '').replace(/\r\n/g, '\r').replace(/\n/g, '\r');
@@ -176,8 +182,6 @@ function mtcInit(raw, options, processingTimestamp) {
 
 function mtcValidateAndExtract(ctx) {
     var f = ctx.f, c = ctx.c, v = ctx.v, sub = ctx.sub, repeat = ctx.repeat, segments = ctx.segments;
-    var sites = 'HPH SGP SCU WRP PPH PGC WGP JFP JHC BEL LMP NOH NWB CPH CBP STA NPH WVP SPP PHC BAR NWP GPH NPE GLE WPH'.split(' ');
-
     if (!segments.MSH || segments.MSH.length !== 1 || !segments.PID || segments.PID.length !== 1) {
         throw new Error('Exactly one MSH and one PID segment are required.');
     }
@@ -190,7 +194,9 @@ function mtcValidateAndExtract(ctx) {
     if (c(f('MSH', 9), 1) !== 'ADT' || (sourceEvent !== 'A08' && sourceEvent !== 'A31')) {
         throw new Error('Only ADT A08 and ADT A31 messages are supported.');
     }
-    if (sites.indexOf(site) < 0) { throw new Error('The input site is not allowed.'); }
+    // Any site is allowed, but one must be present (MSH-4.1 or PID-3.6):
+    // it is written to MSH-4, the PID-3 facility and PV1-39.
+    if (site === '') { throw new Error('No site found in MSH-4 or PID-3.6.'); }
 
     var ids = {}, identifierRows = f('PID', 3).split('~');
     for (var i = 0; i < identifierRows.length; i++) {
@@ -202,6 +208,46 @@ function mtcValidateAndExtract(ctx) {
     if (v('MSH', 10) === '') { throw new Error('MSH-10 must contain a message control ID.'); }
 
     return { sourceEvent: sourceEvent, site: site, ids: ids };
+}
+
+/*
+ * Replaces the old source filter. Reads the raw ER7 text (not `msg`), so it
+ * works with any inbound data type. Returns { accepted, site, event, hasMR }.
+ */
+function charmFilterCheck(raw) {
+    var text = String(raw).replace(/^\uFEFF/, '').replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+    var lines = text.split('\r');
+    var msh = null, pid = null;
+    for (var i = 0; i < lines.length; i++) {
+        var tag = lines[i].substring(0, 4);
+        if (tag === 'MSH|' && msh === null) { msh = lines[i].split('|'); }
+        if (tag === 'PID|' && pid === null) { pid = lines[i].split('|'); }
+    }
+    function first(value) { return HL7_subcomponent(HL7_repeat(value, 0).split('^')[0], 1); }
+
+    // MSH-n is token n-1 (the field separator is MSH-1); other segments use token n.
+    var mshType = msh ? (msh[8] || '') : '';
+    var messageCode = HL7_subcomponent(HL7_component(HL7_repeat(mshType, 0), 1), 1);
+    var event = HL7_subcomponent(HL7_component(HL7_repeat(mshType, 0), 2), 1);
+
+    var site = msh ? first(msh[3] || '') : '';
+    var pid3 = pid ? (pid[3] || '') : '';
+    if (site === '') {
+        site = HL7_subcomponent(HL7_component(HL7_repeat(pid3, 0), 6), 1);
+    }
+
+    var hasMR = false;
+    var reps = pid3 === '' ? [] : pid3.split('~');
+    for (var r = 0; r < reps.length; r++) {
+        if (HL7_subcomponent(HL7_component(reps[r], 5), 1) === 'MR') { hasMR = true; break; }
+    }
+
+    var accepted = messageCode === 'ADT' &&
+        (event === 'A08' || event === 'A31') &&
+        site !== '' &&
+        hasMR;
+
+    return { accepted: accepted, site: site, event: event, hasMR: hasMR };
 }
 
 /* Logs warnings and returns the value to assign to `tmp`. */
@@ -225,6 +271,25 @@ var charmZone = charmOptions.processingTimeZone === ''
 var charmClock = String(java.time.format.DateTimeFormatter.ofPattern('yyyyMMddHHmmss')
     .format(java.time.ZonedDateTime.now(charmZone)));
 
-var charmCtx = mtcInit(String(connectorMessage.getRawData()), charmOptions, charmClock);
-var charmMeta = mtcValidateAndExtract(charmCtx);   // site, sourceEvent ('A08' / 'A31'), ids
+var charmRaw = String(connectorMessage.getRawData());
+var charmCtx = null;
+var charmMeta = null;      // set only for accepted messages; steps 2 and 3 check it
 var charmResult = null;
+
+// Same checks as the old source filter.
+var charmGate = charmFilterCheck(charmRaw);
+channelMap.put('siteCode', charmGate.site);
+channelMap.put('triggerEvent', charmGate.event);
+
+if (charmGate.accepted) {
+    charmCtx = mtcInit(charmRaw, charmOptions, charmClock);
+    charmMeta = mtcValidateAndExtract(charmCtx);   // site, sourceEvent ('A08' / 'A31'), ids
+} else {
+    var charmRejectText = 'Meditech-to-Charm filtered: event=' + charmGate.event +
+        ', site=' + charmGate.site + ', hasMR=' + charmGate.hasMR;
+    if (CHARM_REJECT_AS_ERROR) {
+        throw new Error(charmRejectText);
+    }
+    logger.info(charmRejectText);
+    destinationSet.removeAll();   // don't send to any destination (like a filter)
+}

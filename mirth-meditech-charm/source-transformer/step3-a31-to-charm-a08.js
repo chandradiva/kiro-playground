@@ -114,7 +114,7 @@ function convertMeditechA31ToCharm(ctx, meta) {
 }
 
 /* ===================== Run (A31 only) ===================== */
-if (charmMeta.sourceEvent === 'A31') {
+if (charmMeta !== null && charmMeta.sourceEvent === 'A31') {
     charmResult = convertMeditechA31ToCharm(charmCtx, charmMeta);
     tmp = charmOutput(charmResult);
 }
